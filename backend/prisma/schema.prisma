@@ -23,6 +23,11 @@ enum EstadoEmpleado {
   Inactivo
 }
 
+enum EstadoDueno {
+  Activo
+  Inactivo
+}
+
 enum EstadoCochera {
   Disponible
   Ocupado
@@ -97,6 +102,7 @@ model Dueno {
   email      String                 @unique @db.VarChar(100)
   contrasena String                 @map("contrasena") @db.VarChar(100)
   telefono   String                 @db.VarChar(20)
+  estado     EstadoDueno            @default(Activo)
   playas     PlayaEstacionamiento[]
 
   @@map("Dueno")

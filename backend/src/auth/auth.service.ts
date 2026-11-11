@@ -1,113 +1,119 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import {
+  Injectable,
+  HttpException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcryptjs';
+import { createHash } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
-import { LoginDto } from './dto/login.dto';
+import { LoginDto, TipoCuenta } from './dto/login.dto';
 
-type Rol = 'Usuario' | 'Empleado' | 'Administrador';
-
-type CuentaEncontrada = {
+type Cuenta = {
   id: number;
   email: string;
   contrasena: string;
-  estado?: string;
-  rol: Rol;
+  estado: string;
   nombre: string;
   apellido: string;
+  tipoCuenta: TipoCuenta;
 };
+
+const MAX_INTENTOS_FALLIDOS = 5;
+const VENTANA_MS = 15 * 60 * 1000;
+const MENSAJE_LOGIN = 'Email, contraseña o tipo de cuenta incorrectos';
+const HASH_CEBO = bcrypt.hashSync('clave-ficticia-no-valida-para-login', 10);
 
 @Injectable()
 export class AuthService {
+  private readonly intentos = new Map<string, { cantidad: number; vence: number }>();
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly jwtService: JwtService,
   ) {}
 
-  async login(datos: LoginDto) {
-    const cuenta = await this.buscarCuenta(datos.email);
+  async login(datos: LoginDto, ip: string) {
+    const email = datos.email.trim().toLowerCase();
+    const claveIntentos = createHash('sha256')
+      .update(`${ip}:${datos.tipoCuenta}:${email}`)
+      .digest('hex');
+    const ahora = Date.now();
+    this.limpiarIntentosVencidos(ahora);
+    const registro = this.intentos.get(claveIntentos);
 
-    if (!cuenta || (cuenta.estado && cuenta.estado !== 'Activo')) {
-      throw new UnauthorizedException('Email o contraseña incorrectos');
+    if (registro && registro.cantidad >= MAX_INTENTOS_FALLIDOS) {
+      throw new HttpException('Demasiados intentos. Intenta más tarde.', 429);
     }
+    this.registrarIntentoFallido(claveIntentos, ahora);
 
+    const cuenta = await this.buscarCuenta(email, datos.tipoCuenta);
     const contrasenaValida = await bcrypt.compare(
       datos.contrasena,
-      cuenta.contrasena,
+      cuenta?.contrasena ?? HASH_CEBO,
     );
-
-    if (!contrasenaValida) {
-      throw new UnauthorizedException('Email o contraseña incorrectos');
+    if (!cuenta || cuenta.estado !== 'Activo' || !contrasenaValida) {
+      throw new UnauthorizedException(MENSAJE_LOGIN);
     }
 
-    const payload = {
-      sub: cuenta.id,
+    this.intentos.delete(claveIntentos);
+    const rol = cuenta.tipoCuenta;
+    const accessToken = await this.jwtService.signAsync({
+      sub: `${cuenta.tipoCuenta}:${cuenta.id}`,
+      idCuenta: cuenta.id,
+      tipoCuenta: cuenta.tipoCuenta,
       email: cuenta.email,
-      rol: cuenta.rol,
-    };
-
-    const accessToken = await this.jwtService.signAsync(payload);
+      rol,
+      estado: cuenta.estado,
+    });
 
     return {
       mensaje: 'Inicio de sesión exitoso',
       accessToken,
       perfil: {
         id: cuenta.id,
+        tipoCuenta: cuenta.tipoCuenta,
         nombre: cuenta.nombre,
         apellido: cuenta.apellido,
         email: cuenta.email,
-        rol: cuenta.rol,
+        rol,
+        estado: cuenta.estado,
       },
     };
   }
 
-  private async buscarCuenta(email: string): Promise<CuentaEncontrada | null> {
-    const usuario = await this.prisma.usuario.findUnique({
-      where: { email },
-      select: {
-        id: true,
-        nombre: true,
-        apellido: true,
-        email: true,
-        contrasena: true,
-        estado: true,
-      },
-    });
-
-    if (usuario) {
-      return { ...usuario, rol: 'Usuario' };
+  private async buscarCuenta(
+    email: string,
+    tipoCuenta: TipoCuenta,
+  ): Promise<Cuenta | null> {
+    if (tipoCuenta === TipoCuenta.Cliente) {
+      const cuenta = await this.prisma.usuario.findUnique({ where: { email } });
+      return cuenta ? { ...cuenta, tipoCuenta } : null;
+    }
+    if (tipoCuenta === TipoCuenta.Empleado) {
+      const cuenta = await this.prisma.empleado.findUnique({ where: { email } });
+      return cuenta ? { ...cuenta, tipoCuenta } : null;
     }
 
-    const empleado = await this.prisma.empleado.findUnique({
-      where: { email },
-      select: {
-        id: true,
-        nombre: true,
-        apellido: true,
-        email: true,
-        contrasena: true,
-        estado: true,
-      },
-    });
+    const cuenta = await this.prisma.dueno.findUnique({ where: { email } });
+    return cuenta ? { ...cuenta, tipoCuenta } : null;
+  }
 
-    if (empleado) {
-      return { ...empleado, rol: 'Empleado' };
+  private registrarIntentoFallido(clave: string, ahora: number): void {
+    if (this.intentos.size >= 10_000 && !this.intentos.has(clave)) {
+      const primeraClave = this.intentos.keys().next().value;
+      if (primeraClave) this.intentos.delete(primeraClave);
     }
-
-    const dueno = await this.prisma.dueno.findUnique({
-      where: { email },
-      select: {
-        id: true,
-        nombre: true,
-        apellido: true,
-        email: true,
-        contrasena: true,
-      },
+    const actual = this.intentos.get(clave);
+    this.intentos.set(clave, {
+      cantidad: (actual?.cantidad ?? 0) + 1,
+      vence: actual?.vence ?? ahora + VENTANA_MS,
     });
+  }
 
-    if (dueno) {
-      return { ...dueno, rol: 'Administrador' };
+  private limpiarIntentosVencidos(ahora: number): void {
+    for (const [clave, registro] of this.intentos) {
+      if (registro.vence <= ahora) this.intentos.delete(clave);
     }
-
-    return null;
   }
 }

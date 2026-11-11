@@ -1,7 +1,7 @@
-import { Body, Controller, Get, Post, UseGuards } from '@nestjs/common';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
-import { Roles } from '../auth/decorators/roles.decorator';
-import { RolesGuard } from '../auth/guards/roles.guard';
+import { Body, Controller, Get, Patch, Post, Req, UseGuards } from '@nestjs/common';
+import { Request } from 'express';
+import { DatosToken, JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { ActualizarPerfilDto } from './dto/actualizar-perfil.dto';
 import { CrearUsuarioDto } from './dto/crear-usuario.dto';
 import { UsuariosService } from './usuarios.service';
 
@@ -10,10 +10,30 @@ export class UsuariosController {
   constructor(private readonly usuariosService: UsuariosService) {}
 
   @Get()
-  @Roles('Empleado', 'Administrador')
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  listar() {
-    return this.usuariosService.listar();
+  @UseGuards(JwtAuthGuard)
+  listar(@Req() request: Request & { user: DatosToken }) {
+    return this.usuariosService.listar(request.user);
+  }
+
+  @Get('me')
+  @UseGuards(JwtAuthGuard)
+  perfil(@Req() request: Request & { user: DatosToken }) {
+    return this.usuariosService.listar(request.user);
+  }
+
+  @Patch('me')
+  @UseGuards(JwtAuthGuard)
+  actualizarPerfil(
+    @Body() datos: ActualizarPerfilDto,
+    @Req() request: Request & { user: DatosToken },
+  ) {
+    return this.usuariosService.actualizarPerfil(request.user, datos);
+  }
+
+  @Get('me/historial')
+  @UseGuards(JwtAuthGuard)
+  historial(@Req() request: Request & { user: DatosToken }) {
+    return this.usuariosService.historial(request.user);
   }
 
   @Post()
